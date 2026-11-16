@@ -141,10 +141,41 @@ bool Game::finishStep() {
   return false;
 }
 
+bool Game::placeable(const Card &card) const {
+  if (card.rank() == int(m_piles[Foundation + card.suit()].size())) return true;
+  for (int to = Tableau; to < Piles; ++to) {
+    const auto &pile = m_piles[to];
+    if (pile.empty() ? card.rank() == 12 : pile.back().red() != card.red() && pile.back().rank() == card.rank() + 1) return true;
+  }
+  return false;
+}
+
+bool Game::stockHelps() const {
+  // Nothing played from the waste changes what a pass shows, so one full
+  // pass from a fresh stock shows every card the stock will ever offer.
+  std::vector<Card> stock = m_piles[Stock], waste = m_piles[Waste];
+  for (bool recycled = false;;) {
+    if (stock.empty()) {
+      if (recycled || waste.empty()) return false;
+      stock.assign(waste.rbegin(), waste.rend());
+      waste.clear();
+      recycled = true;
+    }
+    for (int i = 0; i < Draw && !stock.empty(); ++i) {
+      waste.push_back(stock.back());
+      stock.pop_back();
+    }
+    if (placeable(waste.back())) return true;
+  }
+}
+
 std::optional<Move> Game::hint() const {
+  // A card just brought down from a foundation is there to be built on, not sent straight back.
+  const int pulled = !m_moves.empty() && m_moves.back().from >= Foundation && m_moves.back().from < Tableau ? m_moves.back().to : -1;
+  auto homeFor = [this](const Card &card) { return card.rank() == int(m_piles[Foundation + card.suit()].size()); };
   // A card that can go home.
   for (int from = Waste; from < Piles; from = from == Waste ? int(Tableau) : from + 1) {
-    if (m_piles[from].empty()) continue;
+    if (m_piles[from].empty() || from == pulled) continue;
     const int top = int(m_piles[from].size()) - 1;
     const int home = Foundation + m_piles[from][top].suit();
     if (canMove(from, top, home)) return Move{from, home, 1, false};
@@ -161,13 +192,46 @@ std::optional<Move> Game::hint() const {
       return Move{from, to, int(pile.size()) - index, false};
     }
   }
+  // Part of a run, when the card it uncovers can then go home. Never onto the
+  // card just brought down, which is kept for the move it came down for.
+  for (int from = Tableau; from < Piles; ++from) {
+    const auto &pile = m_piles[from];
+    for (int index = int(pile.size()) - 1; index > 0 && pile[index - 1].up; --index) {
+      for (int to = Tableau; to < Piles; ++to) {
+        if (to == pulled || m_piles[to].empty() || !canMove(from, index, to)) continue;
+        if (homeFor(pile[index - 1])) return Move{from, to, int(pile.size()) - index, false};
+      }
+    }
+  }
   if (!m_piles[Waste].empty()) {
     const int top = int(m_piles[Waste].size()) - 1;
     for (int to = Tableau; to < Piles; ++to)
       if (canMove(Waste, top, to)) return Move{Waste, to, 1, false};
   }
-  if (!m_piles[Stock].empty()) return Move{Stock, Waste, std::min(int(Draw), int(m_piles[Stock].size())), false};
-  if (!m_piles[Waste].empty()) return Move{Waste, Stock, int(m_piles[Waste].size()), false};
+  // A card back down from its foundation, when that gives the waste's card a
+  // place to go, or a column's run one that turns the card beneath it. Only
+  // those: each is a step that cannot be taken back, so hints never go round.
+  for (int home = Foundation; home < Tableau; ++home) {
+    if (m_piles[home].size() < 2) continue;
+    const Card card = m_piles[home].back();
+    for (int to = Tableau; to < Piles; ++to) {
+      if (!canMove(home, int(m_piles[home].size()) - 1, to)) continue;
+      auto builds = [&](const Card &other) { return other.red() != card.red() && other.rank() + 1 == card.rank(); };
+      if (!m_piles[Waste].empty() && builds(m_piles[Waste].back())) return Move{home, to, 1, false};
+      for (int from = Tableau; from < Piles; ++from) {
+        const auto &pile = m_piles[from];
+        if (from == to || pile.empty()) continue;
+        int index = int(pile.size()) - 1;
+        while (index > 0 && pile[index - 1].up) --index;
+        if (index > 0 && builds(pile[index])) return Move{home, to, 1, false};
+      }
+    }
+  }
+  // Turning the stock, as long as it has something to offer.
+  if (stockHelps()) {
+    if (!m_piles[Stock].empty()) return Move{Stock, Waste, std::min(int(Draw), int(m_piles[Stock].size())), false};
+    return Move{Waste, Stock, int(m_piles[Waste].size()), false};
+  }
   return std::nullopt;
 }
 

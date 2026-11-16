@@ -1,7 +1,7 @@
 #include "cli.h"
 #include "klondike.h"
+#include "savefile.h"
 #include <QCoreApplication>
-#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -67,20 +67,14 @@ int runCli(int argc, char **argv) {
   }
   if (command != "inspect") return fail("Unknown command. Use cards --help.");
   if (!args.isEmpty()) return fail("Usage: cards inspect [--json]");
-  QFile file(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/game.json");
-  if (!file.open(QIODevice::ReadOnly)) return fail("Could not read saved game: " + file.errorString());
-  if (file.size() > 2 * 1024 * 1024) return fail("Saved game is too large.");
-  QJsonParseError error;
-  const auto data = QJsonDocument::fromJson(file.readAll(), &error).object();
-  const qint64 seed = data["seed"].toInteger();
-  const int draw = data["draw"].toInt(Draw);
-  if (error.error != QJsonParseError::NoError || data["version"].toInt() != 1 || !data["moves"].isArray() || data["moves"].toArray().size() > 100000
-      || seed <= 0 || seed > 0xffffffffll || draw != Draw)
-    return fail("Invalid saved game.");
-  Game game{quint32(seed)};
-  for (const auto value : data["moves"].toArray()) {
-    const auto move = value.toArray();
-    if (move.size() != 3 || !game.play(move[0].toInt(-1), move[1].toInt(-1), move[2].toInt(-1))) return fail("Invalid move in saved game.");
+  Game game;
+  QString problem;
+  switch (SaveFile::read(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/game.json", &game, nullptr, &problem)) {
+  case SaveFile::Result::Missing: return fail("There is no saved game.");
+  case SaveFile::Result::Unreadable: return fail("Could not read saved game: " + problem);
+  case SaveFile::Result::TooLarge: return fail("Saved game is too large.");
+  case SaveFile::Result::Damaged: return fail("Invalid saved game.");
+  case SaveFile::Result::Ok: break;
   }
   print(game, json);
   return 0;

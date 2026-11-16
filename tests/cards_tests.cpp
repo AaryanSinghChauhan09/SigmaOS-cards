@@ -14,8 +14,6 @@
 #include <QtTest>
 
 #include "backend.h"
-#include <algorithm>
-#include <utility>
 #include <QJsonArray>
 #include "theme.h"
 #include "translator.h"
@@ -167,10 +165,13 @@ QString layout(const Game &game) {
 // run down in alternating colors once they show, foundations that run up in suit.
 bool sound(const Game &game) {
     QSet<int> seen;
+    int total = 0;
     for (int pile = 0; pile < Piles; ++pile) {
         const auto &cards = game.pile(pile);
         for (size_t i = 0; i < cards.size(); ++i) {
             seen << cards[i].id;
+            ++total;
+            if (cards[i].id < 0 || cards[i].id > 51) return false;
             if (pile == Stock && cards[i].up) return false;
             if (pile == Waste && !cards[i].up) return false;
             if (pile >= Foundation && pile < Tableau && (cards[i].suit() != pile - Foundation || cards[i].rank() != int(i) || !cards[i].up)) return false;
@@ -181,7 +182,7 @@ bool sound(const Game &game) {
             if (pile >= Tableau && i + 1 == cards.size() && !cards[i].up) return false;
         }
     }
-    return seen.size() == 52;
+    return seen.size() == 52 && total == 52;
 }
 
 // The first deal that the hints alone play to the end.
@@ -206,6 +207,34 @@ quint32 transferSeed() {
         if (hint && hint->from >= Tableau && hint->to >= Tableau && hint->count == 1 && !Game(seed).pile(hint->to).empty()) found = seed;
     }
     return found;
+}
+
+// The first deal the hints play until they have nothing left to offer, short of winning.
+quint32 stuckSeed() {
+    static quint32 found = 0;
+    for (quint32 seed = 1; !found && seed < 5000; ++seed) {
+        Game game(seed);
+        for (int step = 0; step < 3000; ++step) {
+            const auto hint = game.hint();
+            if (!hint) { if (!game.won()) found = seed; break; }
+            if (!game.play(hint->from, hint->to, hint->count)) break;
+            while (game.finishStep()) { }
+        }
+    }
+    return found;
+}
+
+// What is in a file now, opened afresh, so a file replaced under the same name is seen.
+QByteArray contents(const QString &path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray("(unreadable)");
+}
+
+// A save file's text for a game as it stands.
+QByteArray saved(const Game &game, const QByteArray &extraMoves = {}) {
+    QByteArray moves;
+    for (const Move &move : game.moves()) moves += QByteArray(moves.isEmpty() ? "" : ",") + "[" + QByteArray::number(move.from) + "," + QByteArray::number(move.to) + "," + QByteArray::number(move.count) + "]";
+    return "{\"version\":1,\"seed\":" + QByteArray::number(game.seed()) + ",\"moves\":[" + moves + extraMoves + "]}";
 }
 
 // Follows the hints until nothing is hidden, then waits while the game plays itself out.
@@ -235,9 +264,9 @@ struct Stage {
     QQmlApplicationEngine engine;
     QStringList warnings;
     QQuickWindow *window = nullptr;
-    explicit Stage(const QString &directory) : translator(directory + "/language"), theme(directory), backend(":memory:") {
+    explicit Stage(const QString &directory, const QString &save = ":memory:") : translator(directory + "/language"), theme(directory), backend(save) {
         QCoreApplication::installTranslator(&translator);
-        backend.newGame(9);
+        if (save == ":memory:") backend.newGame(9);
         QObject::connect(&engine, &QQmlEngine::warnings, &engine, [this](const QList<QQmlError> &errors) {
             for (const auto &error : errors) warnings << error.toString();
         });
@@ -555,17 +584,105 @@ private slots:
 
     void sendingACardPrefersHome() {
         // Any ace on top of a column goes home rather than onto a two.
+        int aces = 0;
         for (quint32 seed = 1; seed <= 400; ++seed) {
             const Game game(seed);
             for (int from = Tableau; from < Piles; ++from) {
                 const int top = int(game.pile(from).size()) - 1;
                 if (game.pile(from)[top].rank() != 0) continue;
                 QCOMPARE(game.bestTarget(from, top), Foundation + game.pile(from)[top].suit());
-                QCOMPARE(game.bestTarget(from, top - 1), -1);
-                return;
+                ++aces;
             }
         }
-        QFAIL("no deal with an ace showing");
+        QVERIFY(aces > 20);
+    }
+
+    void positionsFoundInPlayKeepTheFinerRules() {
+        // Positions no deal starts in, reached by playing: each rule is counted
+        // so the test fails if the search stops finding the position it is about.
+        int kingsAtFoot = 0, wasteHome = 0, buriedWaste = 0, homeTops = 0, comeDown = 0;
+        for (quint32 seed = 1; seed <= 150; ++seed) {
+            Game game(seed);
+            for (int step = 0; step < 400 && !game.won(); ++step) {
+                // Only the last card of the waste or a foundation moves, and only by itself.
+                for (int pile = Waste; pile < Tableau; ++pile) {
+                    const int size = int(game.pile(pile).size());
+                    for (int index = 0; index < size - 1; ++index) {
+                        QVERIFY(game.targets(pile, index).empty());
+                        QCOMPARE(game.bestTarget(pile, index), -1);
+                        buriedWaste += pile == Waste;
+                    }
+                    if (pile >= Foundation && size > 0) {
+                        // A card that is home can be carried back to a column, never to another foundation.
+                        for (int to : game.targets(pile, size - 1)) QVERIFY(to >= Tableau);
+                        comeDown += !game.targets(pile, size - 1).empty();
+                        ++homeTops;
+                    }
+                }
+                if (!game.pile(Waste).empty()) {
+                    const int top = int(game.pile(Waste).size()) - 1;
+                    const int home = Foundation + game.pile(Waste)[top].suit();
+                    if (game.canMove(Waste, top, home)) { QCOMPARE(game.bestTarget(Waste, top), home); ++wasteHome; }
+                }
+                // A king alone at the foot of its column is not sent to another empty one.
+                bool space = false;
+                for (int pile = Tableau; pile < Piles; ++pile) space = space || game.pile(pile).empty();
+                for (int pile = Tableau; space && pile < Piles; ++pile) {
+                    if (game.pile(pile).empty() || game.pile(pile)[0].rank() != 12 || !game.pile(pile)[0].up) continue;
+                    bool onto = false;
+                    for (int to : game.targets(pile, 0)) onto = onto || !game.pile(to).empty();
+                    if (!onto) { QCOMPARE(game.bestTarget(pile, 0), -1); ++kingsAtFoot; }
+                }
+                const auto hint = game.hint();
+                if (!hint) break;
+                QVERIFY(game.play(hint->from, hint->to, hint->count));
+            }
+        }
+        QVERIFY2(kingsAtFoot > 0 && wasteHome > 0 && buriedWaste > 0 && homeTops > 0 && comeDown > 0,
+                 qPrintable(QString("%1 %2 %3 %4 %5").arg(kingsAtFoot).arg(wasteHome).arg(buriedWaste).arg(homeTops).arg(comeDown)));
+    }
+
+    void hintsGiveUpOnlyWhenThereIsNothingToFind() {
+        int wins = 0, stuck = 0;
+        for (quint32 seed = 1; seed <= 200; ++seed) {
+            Game game(seed);
+            int step = 0;
+            for (; step < 3000 && !game.won(); ++step) {
+                const auto hint = game.hint();
+                if (!hint) break;
+                QVERIFY(game.play(hint->from, hint->to, hint->count));
+                while (game.finishStep()) { }
+            }
+            // No game is left turning the stock for ever: it is won, or the hints say there is nothing.
+            QVERIFY2(step < 3000, qPrintable(QString("seed %1 never settles").arg(seed)));
+            if (game.won()) { ++wins; continue; }
+            ++stuck;
+            // Nothing can go home, and nothing on the waste has a place.
+            for (int from = Waste; from < Piles; from = from == Waste ? int(Tableau) : from + 1) {
+                const int top = int(game.pile(from).size()) - 1;
+                if (top < 0) continue;
+                QVERIFY2(!game.canMove(from, top, Foundation + game.pile(from)[top].suit()), qPrintable(QString("seed %1").arg(seed)));
+            }
+            // No part of a run can move so that the card under it goes home or turns over.
+            for (int from = Tableau; from < Piles; ++from) {
+                const auto &pile = game.pile(from);
+                for (int index = 1; index < int(pile.size()); ++index) {
+                    if (!pile[index].up) continue;
+                    const Card under = pile[index - 1];
+                    const bool frees = !under.up || under.rank() == int(game.pile(Foundation + under.suit()).size());
+                    for (int to : game.targets(from, index))
+                        QVERIFY2(!(frees && to >= Tableau && !game.pile(to).empty()), qPrintable(QString("seed %1: %2 from %3").arg(seed).arg(index).arg(from)));
+                }
+            }
+            // A whole turn of the stock shows nothing that can be played.
+            Game turning = game;
+            const int turns = int(game.pile(Stock).size() + game.pile(Waste).size()) / 3 + 3;
+            for (int turn = 0; turn < 2 * turns && turning.drawStock(); ++turn) {
+                const int top = int(turning.pile(Waste).size()) - 1;
+                if (top >= 0) QVERIFY2(turning.targets(Waste, top).empty(), qPrintable(QString("seed %1").arg(seed)));
+            }
+        }
+        QVERIFY2(wins > 10 && stuck > 10, qPrintable(QString("%1 won, %2 stuck").arg(wins).arg(stuck)));
     }
 
     void clicksPickUpAndPutDown() {
@@ -574,7 +691,11 @@ private slots:
         const Move move = *backend.game().hint();
         const int index = int(backend.game().pile(move.from).size()) - move.count;
         const QVariantList before = backend.cards();
+        // Picking a card up moves nothing, so the table is not laid out again for it.
+        QSignalSpy laidOut(&backend, &Backend::changed), marked(&backend, &Backend::marksChanged);
         backend.activate(move.from, index);
+        QCOMPARE(laidOut.count(), 0);
+        QCOMPARE(marked.count(), 1);
         QCOMPARE(backend.selectedPile(), move.from);
         QCOMPARE(backend.selectedIndex(), index);
         QVERIFY(backend.targets().contains(move.to));
@@ -635,18 +756,94 @@ private slots:
         QCOMPARE(backend.hintTo(), move.to);
         QCOMPARE(backend.hintIndex(), int(backend.game().pile(move.from).size()) - move.count);
         QVERIFY(!backend.stuck());
-        // Any move clears it.
+        // Any move clears it, and so does taking one back.
         backend.draw();
         QCOMPARE(backend.hintFrom(), -1);
         QCOMPARE(backend.hintTo(), -1);
+        backend.hint();
+        QVERIFY(backend.hintFrom() >= 0);
+        backend.undo();
+        QCOMPARE(backend.hintFrom(), -1);
+        backend.activate(move.from, int(backend.game().pile(move.from).size()) - move.count);
+        QCOMPARE(backend.selectedPile(), move.from);
+        QVERIFY(!backend.targets().isEmpty());
+        backend.draw();
+        backend.activate(move.from, int(backend.game().pile(move.from).size()) - move.count);
+        backend.undo();
+        QCOMPARE(backend.selectedPile(), -1);
+        QVERIFY(backend.targets().isEmpty());
+    }
+
+    void aHintWithNothingToOfferSaysSo() {
+        Backend backend(":memory:");
+        backend.newGame(stuckSeed());
+        while (const auto move = backend.game().hint()) {
+            if (move->from == Stock || move->to == Stock) backend.draw();
+            else QVERIFY(backend.drop(move->from, int(backend.game().pile(move->from).size()) - move->count, move->to));
+        }
+        QVERIFY(!backend.won());
+        QVERIFY(!backend.stuck());
+        backend.hint();
+        QVERIFY(backend.stuck());
+        QCOMPARE(backend.hintFrom(), -1);
+        QCOMPARE(backend.hintTo(), -1);
+        // It goes away with the next thing done.
+        backend.cancelSelection();
+        QVERIFY(!backend.stuck());
+        backend.hint();
+        QVERIFY(backend.stuck());
+        backend.undo();
+        QVERIFY(!backend.stuck());
+    }
+
+    void aCardThatIsHomeComesBackOnlyByHand() {
+        Backend backend(":memory:");
+        // Play until a card on a foundation could be set back on a column.
+        int home = -1, to = -1;
+        for (quint32 seed = 1; seed < 200 && home < 0; ++seed) {
+            backend.newGame(seed);
+            for (int step = 0; step < 300 && home < 0; ++step) {
+                const auto move = backend.game().hint();
+                if (!move) break;
+                if (move->from == Stock || move->to == Stock) backend.draw();
+                else if (!backend.drop(move->from, int(backend.game().pile(move->from).size()) - move->count, move->to)) break;
+                for (int pile = Foundation; pile < Tableau && home < 0; ++pile) {
+                    const int top = int(backend.game().pile(pile).size()) - 1;
+                    if (top < 0) continue;
+                    const auto targets = backend.game().targets(pile, top);
+                    if (!targets.empty()) { home = pile; to = targets.front(); }
+                }
+            }
+        }
+        QVERIFY(home >= 0);
+        const int top = int(backend.game().pile(home).size()) - 1;
+        const int moves = backend.moves(), cards = backend.home();
+        // A double click or F leaves it where it is.
+        QVERIFY(!backend.autoPlay(home, top));
+        QCOMPARE(backend.moves(), moves);
+        // Picked up and put down, or dragged, it goes.
+        backend.activate(home, top);
+        QCOMPARE(backend.selectedPile(), home);
+        backend.activate(to, int(backend.game().pile(to).size()) - 1);
+        QCOMPARE(backend.moves(), moves + 1);
+        QCOMPARE(backend.home(), cards - 1);
     }
 
     void winningEndsTheGame() {
         Backend backend(":memory:");
+        backend.setActive(true);
         backend.newGame(winnable());
+        backend.draw();
+        QTRY_VERIFY_WITH_TIMEOUT(backend.elapsed() >= 1, 2500);
+        backend.undo();
         QVERIFY(playOut(backend));
         QVERIFY(backend.won());
         QCOMPARE(backend.home(), 52);
+        // The clock stops with the last card.
+        const int time = backend.elapsed();
+        QVERIFY(time >= 1);
+        QTest::qWait(1200);
+        QCOMPARE(backend.elapsed(), time);
         const int moves = backend.moves();
         backend.draw();
         backend.activate(Foundation, 12);
@@ -672,8 +869,17 @@ private slots:
         // The last move starts it; nothing else can be played meanwhile, and undo stops it.
         QVERIFY(!backend.won());
         const int moves = backend.moves();
+        int pile = Tableau;
+        while (backend.game().pile(pile).empty() || !backend.game().canMove(pile, int(backend.game().pile(pile).size()) - 1, Foundation + backend.game().pile(pile).back().suit())) ++pile;
+        const int top = int(backend.game().pile(pile).size()) - 1, home = Foundation + backend.game().pile(pile).back().suit();
+        QVERIFY(!backend.drop(pile, top, home));
+        QVERIFY(!backend.autoPlay(pile, top));
+        backend.activate(pile, top);
+        QCOMPARE(backend.selectedPile(), -1);
+        backend.hint();
+        QCOMPARE(backend.hintFrom(), -1);
+        QCOMPARE(backend.moves(), moves);
         QTRY_VERIFY(backend.moves() > moves + 1);
-        backend.draw();
         backend.undo();
         const int stopped = backend.moves();
         QTest::qWait(300);
@@ -681,9 +887,36 @@ private slots:
         QVERIFY(!backend.won());
     }
 
+    void aGameLeftWhileFinishingCarriesOn() {
+        QTemporaryDir dir;
+        int cards = 0;
+        {
+            Backend backend(dir.filePath("game.json"));
+            backend.newGame(winnable());
+            while (!backend.game().finishable()) {
+                const Move move = *backend.game().hint();
+                if (move.from == Stock || move.to == Stock) backend.draw();
+                else QVERIFY(backend.drop(move.from, int(backend.game().pile(move.from).size()) - move.count, move.to));
+            }
+            cards = backend.home();
+        }
+        Backend restored(dir.filePath("game.json"));
+        QVERIFY(restored.home() >= cards);
+        QVERIFY(!restored.won());
+        QTRY_VERIFY_WITH_TIMEOUT(restored.won(), 10000);
+    }
+
     void theClockRunsOnlyWhileTheGameIsInFront() {
         Backend backend(":memory:");
         backend.newGame(9);
+        // Until the window says it is in front, the clock waits, moves or not.
+        QVERIFY(!backend.active());
+        backend.draw();
+        QTest::qWait(1200);
+        QCOMPARE(backend.elapsed(), 0);
+        backend.newGame(9);
+        backend.setActive(true);
+        // And in front, it waits for the first move.
         QTest::qWait(1200);
         QCOMPARE(backend.elapsed(), 0);
         backend.draw();
@@ -709,8 +942,14 @@ private slots:
             game.draw();
             game.setSeries(3);
             state = layout(game.game());
+            // Time that passes after the last move is kept too, written as the game is put away.
+            game.setActive(true);
+            QTRY_VERIFY_WITH_TIMEOUT(game.elapsed() >= 1, 2500);
+            QCOMPARE(readCatalog(dir.filePath("game.json"))["elapsed"].toInt(), 0);
         }
+        QVERIFY(readCatalog(dir.filePath("game.json"))["elapsed"].toInt() >= 1);
         Backend restored(dir.filePath("game.json"));
+        QVERIFY(restored.elapsed() >= 1);
         QCOMPARE(layout(restored.game()), state);
         QCOMPARE(restored.moves(), 2);
         QCOMPARE(restored.series(), 3);
@@ -738,9 +977,20 @@ private slots:
     void damagedSaveSurvivesPreferences() {
         QTemporaryDir dir;
         const QString path = dir.filePath("game.json");
-        for (const QByteArray &damaged : {QByteArray("not json"), QByteArray(R"({"version":1,"seed":9,"draw":3,"moves":[[6,6,1]]})"),
-                                          QByteArray(R"({"version":1,"seed":0,"draw":3,"moves":[]})"), QByteArray(R"({"version":1,"seed":9,"draw":2,"moves":[]})"),
-                                          QByteArray(R"({"version":2,"seed":9,"draw":3,"moves":[]})")}) {
+        // A game that goes on after it was won, and one longer than is ever written.
+        Game won(winnable());
+        while (!won.won()) {
+            if (won.finishStep()) continue;
+            const Move move = *won.hint();
+            QVERIFY(won.play(move.from, move.to, move.count));
+        }
+        Game endless(9);
+        while (int(endless.moves().size()) <= 100000) QVERIFY(endless.drawStock());
+        for (const QByteArray &damaged : {QByteArray("not json"), QByteArray(R"({"version":1,"seed":9,"moves":[[6,6,1]]})"),
+                                          QByteArray(R"({"version":1,"seed":0,"moves":[]})"), QByteArray(R"({"version":1,"seed":4294967296,"moves":[]})"),
+                                          QByteArray(R"({"version":1,"seed":9,"moves":[[0,1]]})"), QByteArray(R"({"version":1,"seed":9,"moves":{}})"),
+                                          QByteArray(R"({"version":2,"seed":9,"moves":[]})"), saved(won, ",[12,11,1]"), saved(endless),
+                                          QByteArray(2 * 1024 * 1024 + 1, ' ')}) {
             QVERIFY(write(path, damaged));
             Backend backend(path);
             QVERIFY(!backend.error().isEmpty());
@@ -748,9 +998,13 @@ private slots:
             QCOMPARE(backend.moves(), 0);
             backend.setSeries(2);
             backend.draw();
-            QFile file(path);
-            QVERIFY(file.open(QIODevice::ReadOnly));
-            QCOMPARE(file.readAll(), damaged);
+            QCOMPARE(contents(path), damaged);
+            // Dismissing the message changes nothing about the game not being saved.
+            backend.dismissError();
+            QVERIFY(backend.error().isEmpty());
+            QVERIFY(!backend.saveHealthy());
+            backend.draw();
+            QCOMPARE(contents(path), damaged);
             // Only an explicit new game replaces it.
             backend.newGame(9);
             QVERIFY(backend.saveHealthy());
@@ -759,26 +1013,50 @@ private slots:
         }
     }
 
+    void theLongestGameStillOpens() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("game.json");
+        // What the app writes for a game at its limit is under the size it will read.
+        Game longest(9);
+        while (int(longest.moves().size()) < 100000) QVERIFY(longest.drawStock());
+        QVERIFY(write(path, saved(longest)));
+        {
+            Backend backend(path);
+            QVERIFY2(backend.error().isEmpty(), qPrintable(backend.error()));
+            QCOMPARE(backend.moves(), 100000);
+            // It takes no more moves, so it can always be read back; undo still works.
+            backend.draw();
+            QCOMPARE(backend.moves(), 100000);
+            backend.undo();
+            QCOMPARE(backend.moves(), 99999);
+            backend.draw();
+            QCOMPARE(backend.moves(), 100000);
+        }
+        QVERIFY(QFileInfo(path).size() < 2 * 1024 * 1024);
+        Backend again(path);
+        QVERIFY(again.error().isEmpty());
+        QCOMPARE(again.moves(), 100000);
+    }
+
     void failedSavePreservesPreviousGame() {
         QTemporaryDir dir;
         const QString path = dir.filePath("save/game.json");
         Backend backend(path);
         backend.newGame(9);
         backend.draw();
-        QFile saved(path);
-        QVERIFY(saved.open(QIODevice::ReadOnly));
-        const QByteArray before = saved.readAll();
+        const QByteArray before = contents(path);
+        QVERIFY(before.contains("\"seed\":9"));
         // A folder that takes no new files fails the save rather than rewriting the game in place.
         QVERIFY(QFile::setPermissions(dir.filePath("save"), QFile::ReadOwner | QFile::ExeOwner));
         backend.draw();
         QVERIFY(!backend.saveHealthy());
         QVERIFY(!backend.error().isEmpty());
-        saved.seek(0);
-        QCOMPARE(saved.readAll(), before);
+        QCOMPARE(contents(path), before);
         QVERIFY(QFile::setPermissions(dir.filePath("save"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         backend.draw();
         QVERIFY(backend.saveHealthy());
         QVERIFY(backend.error().isEmpty());
+        QVERIFY(contents(path) != before);
     }
 
     void secondLaunchWaitsForStartingOwner() {
@@ -837,7 +1115,7 @@ private slots:
         QCOMPARE(run({"deal"}), 0);
         QCOMPARE(run({"deal", "0"}), 1);
         QVERIFY(!process.readAllStandardError().isEmpty());
-        QCOMPARE(run({"deal", "--draw", "2"}), 1);
+        QCOMPARE(run({"deal", "1", "2"}), 1);
         QCOMPARE(run({"shuffle"}), 1);
         // The app carries no version of its own; the package it came in has one.
         QCOMPARE(run({"--version"}), 1);
@@ -886,11 +1164,30 @@ private slots:
         QCOMPARE(table->property("cursorPile").toInt(), Foundation + 3);
         QCOMPARE(table->property("cursorIndex").toInt(), -1);
 
+        // Taking the draw back leaves the waste empty, and the cursor follows it there.
+        QTest::keyClick(window, Qt::Key_Left);
+        for (int press = 0; press < 5; ++press) QTest::keyClick(window, Qt::Key_Left);
+        QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(table->property("cursorPile").toInt(), int(Waste));
+        QCOMPARE(table->property("cursorIndex").toInt(), 2);
+        auto *under = findItem(window->contentItem(), QString("card-%1").arg(backend.game().pile(Waste).back().id));
+        QVERIFY(under && under->findChild<QQuickItem *>("cursorRing")->isVisible());
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(backend.stock(), 24);
+        QCOMPARE(table->property("cursorIndex").toInt(), -1);
+        QVERIFY(!under->findChild<QQuickItem *>("cursorRing")->isVisible());
+
         // The hint key marks a move, and F sends the card under the cursor on its way.
         backend.newGame(transferSeed());
         const Move move = *backend.game().hint();
         QTest::keyClick(window, Qt::Key_H);
         QCOMPARE(backend.hintFrom(), move.from);
+        auto *hintRing = findItem(window->contentItem(), "hintRing");
+        auto *hintTargetRing = findItem(window->contentItem(), "hintTargetRing");
+        QVERIFY(hintRing && hintRing->isVisible() && hintTargetRing && hintTargetRing->isVisible());
+        QVERIFY(qAbs(hintRing->x() + hintRing->width() / 2 - table->property("cardWidth").toReal() / 2
+                     - findItem(window->contentItem(), QString("slot-%1").arg(move.from))->x()) < 1);
+        QVERIFY(qAbs(hintTargetRing->x() - findItem(window->contentItem(), QString("slot-%1").arg(move.to))->x()) < 6);
         QVERIFY(QMetaObject::invokeMethod(table, "navigate", Q_ARG(QVariant, 0), Q_ARG(QVariant, 1)));
         table->setProperty("cursorPile", move.from);
         table->setProperty("cursorIndex", int(backend.game().pile(move.from).size()) - move.count);
@@ -1003,6 +1300,52 @@ private slots:
         QVERIFY(right(stockStat) + 8 <= left(undo));
         window->resize(original);
         QTest::qWait(150);
+        // A long column closes up to stay on the table, even in the smallest window.
+        {
+            int longest = -1;
+            for (quint32 seed = 1; seed < 400 && longest < 0; ++seed) {
+                backend.newGame(seed);
+                for (int step = 0; step < 300 && longest < 0; ++step) {
+                    const auto next = backend.game().hint();
+                    if (!next || backend.game().finishable()) break;
+                    if (next->from == Stock || next->to == Stock) backend.draw();
+                    else QVERIFY(backend.drop(next->from, int(backend.game().pile(next->from).size()) - next->count, next->to));
+                    for (int pile = Tableau; pile < Piles; ++pile)
+                        if (backend.piles()[pile].toMap()["up"].toInt() >= 12 && !backend.game().finishable()) longest = pile;
+                }
+            }
+            QVERIFY(longest >= 0);
+            window->resize(720, 540);
+            QTest::qWait(200);
+            auto *first = findItem(window->contentItem(), QString("card-%1").arg(backend.game().pile(longest).front().id));
+            auto *last = findItem(window->contentItem(), QString("card-%1").arg(backend.game().pile(longest).back().id));
+            QVERIFY(first && last);
+            QVERIFY2(last->y() + last->height() <= table->height() + .5, qPrintable(QString::number(last->y() + last->height())));
+            // Closed up: its cards lie nearer than they would with room to spare.
+            const int count = int(backend.game().pile(longest).size());
+            QVERIFY((last->y() - first->y()) / (count - 1) < table->property("upStep").toReal() - .5);
+            window->resize(original);
+            QTest::qWait(200);
+        }
+
+        // When a hint finds nothing, the footer says so where the counts were.
+        auto *status = window->findChild<QQuickItem *>("status");
+        auto *stats = window->findChild<QQuickItem *>("stats");
+        QVERIFY(status && stats && !status->isVisible() && stats->isVisible());
+        backend.newGame(stuckSeed());
+        while (const auto next = backend.game().hint()) {
+            if (next->from == Stock || next->to == Stock) backend.draw();
+            else QVERIFY(backend.drop(next->from, int(backend.game().pile(next->from).size()) - next->count, next->to));
+        }
+        QTest::keyClick(window, Qt::Key_H);
+        QVERIFY(backend.stuck());
+        QVERIFY(status->isVisible() && !stats->isVisible());
+        QVERIFY(!hintRing->isVisible() && !hintTargetRing->isVisible());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QVERIFY(!status->isVisible() && stats->isVisible());
+        // A healthy game shows no warning about saving.
+        QVERIFY(!window->findChild<QQuickItem *>("unsavedMark")->isVisible());
+
         // N deals a new game at once, and so does the footer's button.
         backend.draw();
         QString dealt = layout(backend.game());
@@ -1034,6 +1377,12 @@ private slots:
             return item ? item->mapToScene(QPointF(item->width() / 2, 10)).toPoint() : QPoint();
         };
         // A click on the stock draws; a click on its empty place brings the waste back.
+        for (int turn = 0; turn < 8; ++turn) QTest::mouseClick(window, Qt::LeftButton, {}, centre(Stock));
+        QCOMPARE(backend.stock(), 0);
+        QTest::mouseClick(window, Qt::LeftButton, {}, centre(Stock));
+        QCOMPARE(backend.stock(), 24);
+        QCOMPARE(backend.moves(), 9);
+        while (backend.canUndo()) backend.undo();
         QTest::mouseClick(window, Qt::LeftButton, {}, centre(Stock));
         QCOMPARE(backend.stock(), 21);
         QTest::mouseClick(window, Qt::LeftButton, {}, centre(Waste));
@@ -1077,6 +1426,67 @@ private slots:
         QCOMPARE(backend.moves(), 0);
         QCOMPARE(centre(move.from), from);
 
+        auto *table = window->findChild<QQuickItem *>("table");
+        auto *grip = findItem(window->contentItem(), QString("card-%1").arg(backend.game().pile(move.from).back().id))->findChild<QQuickItem *>("grip");
+        QVERIFY(table && grip);
+        // Picking cards up by dragging lets go of whatever a click had picked up.
+        QTest::mouseClick(window, Qt::LeftButton, {}, centre(move.to));
+        QCOMPARE(backend.selectedPile(), move.to);
+        QTest::mousePress(window, Qt::LeftButton, {}, from);
+        QTest::mouseMove(window, from + QPoint(12, 12));
+        QVERIFY(table->property("dragging").toBool());
+        QCOMPARE(backend.selectedPile(), -1);
+        // Single keys wait while cards are in the hand: no new deal, no draw.
+        const QString inHand = layout(backend.game());
+        QTest::keyClick(window, Qt::Key_N);
+        QTest::keyClick(window, Qt::Key_D);
+        QCOMPARE(layout(backend.game()), inHand);
+        // Escape lets go of them, back where they were, and the release that follows drops nothing.
+        QTest::mouseMove(window, to + QPoint(3, 30));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QVERIFY(!table->property("dragging").toBool());
+        QTest::mouseMove(window, to + QPoint(4, 31));
+        QTest::mouseRelease(window, Qt::LeftButton, {}, to + QPoint(4, 31));
+        QCOMPARE(backend.moves(), 0);
+        QCOMPARE(centre(move.from), from);
+        QTest::mousePress(window, Qt::LeftButton, {}, from);
+        QTest::mouseMove(window, from + QPoint(12, 12));
+        QVERIFY(table->property("dragging").toBool());
+        // A drag that is taken away, rather than let go, puts the cards back.
+        QTest::mouseMove(window, to + QPoint(3, 30));
+        grip->ungrabMouse();
+        QVERIFY(!table->property("dragging").toBool());
+        QCOMPARE(table->property("dragPile").toInt(), -1);
+        QCOMPARE(backend.moves(), 0);
+        QTest::mouseRelease(window, Qt::LeftButton, {}, to + QPoint(3, 30));
+        QCOMPARE(backend.moves(), 0);
+        QCOMPARE(centre(move.from), from);
+
+        // A double click to put a card down puts it down once, and does not send it on,
+        // in a deal where the card that arrives has somewhere else it could go.
+        {
+            quint32 seed = 0;
+            Move twice;
+            for (quint32 candidate = 1; !seed && candidate < 5000; ++candidate) {
+                Game game(candidate);
+                const auto hint = game.hint();
+                if (!hint || hint->from < Tableau || hint->to < Tableau || hint->count != 1) continue;
+                QVERIFY(game.play(hint->from, hint->to, hint->count));
+                if (game.bestTarget(hint->to, int(game.pile(hint->to).size()) - 1) >= 0) { seed = candidate; twice = *hint; }
+            }
+            QVERIFY(seed);
+            backend.newGame(seed);
+            QTest::qWait(50);
+            QTest::mouseClick(window, Qt::LeftButton, {}, centre(twice.from));
+            QCOMPARE(backend.selectedPile(), twice.from);
+            // Lower down the target, where the card arrives, so the second click lands on it.
+            QTest::mouseDClick(window, Qt::LeftButton, {}, centre(twice.to) + QPoint(0, int(table->property("upStep").toReal()) + 12));
+            QCOMPARE(backend.moves(), 1);
+            QCOMPARE(backend.game().moves().back(), twice);
+            backend.newGame(transferSeed());
+            QTest::qWait(50);
+        }
+
         // A double click sends the card to the best place it can go.
         QTest::mouseDClick(window, Qt::LeftButton, {}, from);
         QCOMPARE(backend.moves(), 1);
@@ -1112,6 +1522,27 @@ private slots:
         QCOMPARE(backend.series(), 2);
     }
 
+    void aGameThatIsNotBeingSavedSaysSo() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("game.json");
+        QVERIFY(write(path, "not json"));
+        Stage stage(dir.path(), path);
+        QVERIFY2(stage.window, qPrintable(stage.warnings.join('\n')));
+        auto *mark = stage.window->findChild<QQuickItem *>("unsavedMark");
+        QVERIFY(mark && mark->isVisible());
+        QVERIFY(!stage.backend.error().isEmpty());
+        // Dismissing the message leaves the mark, since nothing is being written still.
+        stage.backend.dismissError();
+        QVERIFY(mark->isVisible());
+        stage.backend.draw();
+        QVERIFY(mark->isVisible());
+        // A new game replaces the damaged save, and the mark goes.
+        QTest::keyClick(stage.window, Qt::Key_N);
+        QVERIFY(stage.backend.saveHealthy());
+        QTRY_VERIFY(!mark->isVisible());
+        QCOMPARE(readCatalog(path)["version"].toInt(), 1);
+    }
+
     void windowMirrorsForArabic() {
         QTemporaryDir dir;
         QVERIFY(write(dir.path() + "/language", "ar\n"));
@@ -1128,6 +1559,13 @@ private slots:
         auto *stock = findItem(window->contentItem(), "slot-0");
         auto *lastColumn = findItem(window->contentItem(), "slot-12");
         QVERIFY(stock && lastColumn && stock->x() < lastColumn->x());
+        // Each card still reads rank first, then suit.
+        auto *shown = findItem(window->contentItem(), QString("card-%1").arg(stage.backend.game().pile(Tableau + 6).back().id));
+        QVERIFY(shown);
+        auto *rank = shown->findChild<QQuickItem *>("rank");
+        auto *pip = shown->findChild<QQuickItem *>("pip");
+        QVERIFY(rank && pip && rank->isVisible());
+        QVERIFY(rank->mapToScene(QPointF(0, 0)).x() < pip->mapToScene(QPointF(0, 0)).x());
         auto *dialog = window->findChild<QObject *>("help");
         QCOMPARE(dialog->property("title").toString(), QString::fromUtf8("في متناول يدك"));
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));

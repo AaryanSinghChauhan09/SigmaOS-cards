@@ -73,7 +73,7 @@ ApplicationWindow {
   ]
   // Phosphor's hearts and diamonds take the accent, unless a theme's accent is
   // too near its text or its background to tell the suits apart; then the
-  // theme's red, orange, or magenta stands in, whichever first stands out.
+  // theme's red, orange, magenta, or blue stands in, whichever first stands out.
   readonly property color phosphorRed: {
     const apart = (a, b) => Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b)
     const candidates = [theme.accent, theme.colors.red, theme.colors.orange, theme.colors.magenta, theme.colors.blue]
@@ -95,9 +95,11 @@ ApplicationWindow {
     { keys: ["?"], text: qsTr("Keyboard shortcuts") },
     { keys: ["Q"], text: qsTr("Quit (your game is saved)") }
   ]
-  property bool modalOpen: helpDialog.visible
+  // Single keys wait while the shortcuts are up or cards are in the hand.
+  property bool busy: helpDialog.visible || table.dragging
   // The clock stops while another window is in front.
   onActiveChanged: backend.active = active
+  Component.onCompleted: backend.active = active
   function whole(number) {
     translator.language
     return number.toLocaleString(Qt.locale(),'f',0)
@@ -112,16 +114,13 @@ ApplicationWindow {
     // Asked for outright: left to the platform, hover and so the tooltip can be off.
     hoverEnabled: true
     property bool lit: false
-    // Footer buttons go without an outline until the pointer is over them.
-    property bool quiet: false
-    Material.roundedScale: theme.radius
     implicitHeight: 38
     topInset: 0; bottomInset: 0; leftInset: 0; rightInset: 0
     focusPolicy: Qt.NoFocus
     background: Rectangle {
       radius: theme.radius
       color: control.down ? Qt.alpha(window.tint,.26) : control.lit ? Qt.alpha(window.tint,control.hovered ? .22 : .13) : control.hovered ? Qt.alpha(theme.foreground,.09) : "transparent"
-      border.color: control.lit ? Qt.alpha(window.tint,.5) : control.quiet ? "transparent" : window.line
+      border.color: control.lit ? Qt.alpha(window.tint,.5) : window.line
     }
     contentItem: Text {
       text: control.text
@@ -345,18 +344,32 @@ ApplicationWindow {
             anchors { left: parent.horizontalCenter; leftMargin: 52; verticalCenter: parent.verticalCenter }
           }
         }
-        // A hint that found nothing says so in their place.
+        // A hint that found nothing says so in their place. It says only that:
+        // the hints look for moves that lead somewhere, not for every move there is.
         Text {
           objectName: "status"
           visible: backend.stuck
           anchors.centerIn: parent
-          text: qsTr("No moves left. Undo, or deal again.")
+          text: qsTr("Nothing more to suggest. Undo, or deal again.")
           color: theme.foreground
           font.pixelSize: 12
         }
         RowLayout {
           anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter }
           spacing: 2
+          // Shown for as long as nothing is being written, whether or not the reason was dismissed.
+          Item {
+            objectName: "unsavedMark"
+            visible: !backend.saveHealthy
+            implicitWidth: 30
+            implicitHeight: 26
+            Accessible.name: qsTr("Game is not being saved")
+            Glyph { anchors.centerIn: parent; path: "M12 4L21 20H3ZM12 10v5M12 17.6v.1"; ink: theme.colors.red }
+            HoverHandler { id: overUnsaved }
+            ToolTip.visible: overUnsaved.hovered
+            ToolTip.delay: 400
+            ToolTip.text: qsTr("Game is not being saved")
+          }
           FooterIcon { objectName: "undoButton"; name: qsTr("Undo"); key: "Ctrl+Z"; path: "M8 5L3.5 9.5L8 14M3.5 9.5H14a5 5 0 0 1 0 10h-3"; enabled: backend.canUndo; onClicked: backend.undo() }
           FooterIcon { objectName: "hintButton"; name: qsTr("Hint"); key: "H"; path: "M9 17.5h6M10 20.5h4M8.5 14a6 6 0 1 1 7 0c-.6.5-.9 1.1-1 2h-5c-.1-.9-.4-1.5-1-2Z"; enabled: !backend.won; onClicked: backend.hint() }
           FooterIcon { objectName: "newGameButton"; name: qsTr("New game"); key: "N"; path: "M12 5v14M5 12h14"; lit: true; Layout.leftMargin: 4; Layout.rightMargin: 4; onClicked: backend.newGame() }
@@ -450,21 +463,22 @@ ApplicationWindow {
       }
     }
   }
-  Shortcut { sequence: "?"; enabled: !window.modalOpen; onActivated: helpDialog.open() }
-  Shortcut { sequence: "Q"; enabled: !window.modalOpen; onActivated: window.close() }
-  Shortcut { sequence: "N"; enabled: !window.modalOpen; onActivated: backend.newGame() }
-  Shortcut { sequences: [StandardKey.Undo]; enabled: !window.modalOpen; onActivated: backend.undo() }
-  Shortcut { sequence: "H"; enabled: !window.modalOpen; onActivated: backend.hint() }
-  Shortcut { sequence: "D"; enabled: !window.modalOpen; onActivated: backend.draw() }
-  Shortcut { sequence: "F"; enabled: !window.modalOpen; onActivated: table.keyboardSend() }
-  Shortcut { sequence: "1"; enabled: !window.modalOpen; onActivated: backend.series = 0 }
-  Shortcut { sequence: "2"; enabled: !window.modalOpen; onActivated: backend.series = 1 }
-  Shortcut { sequence: "3"; enabled: !window.modalOpen; onActivated: backend.series = 2 }
-  Shortcut { sequence: "4"; enabled: !window.modalOpen; onActivated: backend.series = 3 }
-  Shortcut { sequence: "Escape"; enabled: !window.modalOpen; onActivated: backend.cancelSelection() }
-  Shortcut { sequences: ["Space","Return","Enter"]; enabled: !window.modalOpen; onActivated: table.keyboardSelect() }
-  Shortcut { sequence: "Left"; enabled: !window.modalOpen; onActivated: table.navigate(-1,0) }
-  Shortcut { sequence: "Right"; enabled: !window.modalOpen; onActivated: table.navigate(1,0) }
-  Shortcut { sequence: "Up"; enabled: !window.modalOpen; onActivated: table.navigate(0,-1) }
-  Shortcut { sequence: "Down"; enabled: !window.modalOpen; onActivated: table.navigate(0,1) }
+  Shortcut { sequence: "?"; enabled: !window.busy; onActivated: helpDialog.open() }
+  Shortcut { sequence: "Q"; enabled: !window.busy; onActivated: window.close() }
+  Shortcut { sequence: "N"; enabled: !window.busy; onActivated: backend.newGame() }
+  Shortcut { sequences: [StandardKey.Undo]; enabled: !window.busy; onActivated: backend.undo() }
+  Shortcut { sequence: "H"; enabled: !window.busy; onActivated: backend.hint() }
+  Shortcut { sequence: "D"; enabled: !window.busy; onActivated: backend.draw() }
+  Shortcut { sequence: "F"; enabled: !window.busy; onActivated: table.keyboardSend() }
+  Shortcut { sequence: "1"; enabled: !window.busy; onActivated: backend.series = 0 }
+  Shortcut { sequence: "2"; enabled: !window.busy; onActivated: backend.series = 1 }
+  Shortcut { sequence: "3"; enabled: !window.busy; onActivated: backend.series = 2 }
+  Shortcut { sequence: "4"; enabled: !window.busy; onActivated: backend.series = 3 }
+  // Escape also lets go of cards being dragged, back where they were.
+  Shortcut { sequence: "Escape"; enabled: !helpDialog.visible; onActivated: { table.cancelDrag(); backend.cancelSelection() } }
+  Shortcut { sequences: ["Space","Return","Enter"]; enabled: !window.busy; onActivated: table.keyboardSelect() }
+  Shortcut { sequence: "Left"; enabled: !window.busy; onActivated: table.navigate(-1,0) }
+  Shortcut { sequence: "Right"; enabled: !window.busy; onActivated: table.navigate(1,0) }
+  Shortcut { sequence: "Up"; enabled: !window.busy; onActivated: table.navigate(0,-1) }
+  Shortcut { sequence: "Down"; enabled: !window.busy; onActivated: table.navigate(0,1) }
 }

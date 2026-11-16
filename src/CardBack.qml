@@ -8,12 +8,11 @@ Canvas {
   property color fill: "black"
   property color line: "white"
   property real unit: 1
-  onSeriesChanged: requestPaint()
-  onFillChanged: requestPaint()
-  onLineChanged: requestPaint()
-  onUnitChanged: requestPaint()
-  onWidthChanged: requestPaint()
-  onHeightChanged: requestPaint()
+  // A back that is hidden waits until it shows to be drawn; a canvas already
+  // redraws itself when it changes size.
+  onSeriesChanged: if (visible) requestPaint()
+  onFillChanged: if (visible) requestPaint()
+  onLineChanged: if (visible) requestPaint()
   onVisibleChanged: if (visible) requestPaint()
   onPaint: {
     const ctx = getContext("2d")

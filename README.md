@@ -11,7 +11,7 @@ Klondike solitaire for Omarchy, built with C++ and Qt Quick. Draw three, no limi
 
 ## Play
 
-Click a card, then where it goes, or drag it. A double click sends a card to the best place it can go. Once nothing is hidden, the rest of the cards go home by themselves. The game saves after every move.
+Click a card, then where it goes, or drag it. A double click sends a card to the best place it can go. Once nothing is hidden and the stock is spent, the rest of the cards go home by themselves. The game saves after every move.
 
 | Key | Action |
 | --- | --- |

@@ -50,13 +50,14 @@ Item {
     return originX + column * (cardWidth + gap)
   }
   function pileY(pile) { return pile < 6 ? topMargin : tableauTop }
-  // A long column closes up so its last card stays on the table.
-  function squeeze(pile) {
-    const info = backend.piles[pile]
+  // A long column closes up so its last card stays on the table. Worked out
+  // once per pile, not once per card.
+  readonly property var squeezes: backend.piles.map((info) => {
     const wanted = info.down * downStep + Math.max(0, info.up - 1) * upStep
     const room = height - topMargin - tableauTop - cardHeight
     return wanted > room && wanted > 0 ? Math.max(.2, room / wanted) : 1
-  }
+  })
+  function squeeze(pile) { return squeezes[pile] }
   function cardX(info) { return pileX(info.pile) + (info.pile === 1 ? info.fan * cardWidth * fanStep : 0) }
   function cardY(info) {
     if (info.pile < 6) return topMargin
@@ -92,6 +93,27 @@ Item {
     dragIndex = -1
     dragDx = 0
     dragDy = 0
+  }
+
+  // A drag taken away rather than let go puts the cards back where they were.
+  function cancelDrag() {
+    dragging = false
+    dragPile = -1
+    dragIndex = -1
+    dragDx = 0
+    dragDy = 0
+  }
+  // When a click last put cards down, so the second click of a double click
+  // on the same spot doesn't send them on somewhere else.
+  property double placedAt: 0
+  property int placedOn: -1
+  function click(pile, index) {
+    const before = backend.moves
+    backend.activate(pile, index)
+    if (pile !== 0 && backend.moves !== before) {
+      placedAt = Date.now()
+      placedOn = pile
+    }
   }
 
   function topIndex(pile) { return backend.piles[pile].count - 1 }
@@ -147,10 +169,9 @@ Item {
       visible: table.look.pattern !== ""
       property string pattern: table.look.pattern
       property color ink: table.look.patternColor
-      onPatternChanged: requestPaint()
-      onInkChanged: requestPaint()
-      onWidthChanged: requestPaint()
-      onHeightChanged: requestPaint()
+      // A canvas redraws itself when it changes size, and only while it shows.
+      onPatternChanged: if (visible) requestPaint()
+      onInkChanged: if (visible) requestPaint()
       onVisibleChanged: if (visible) requestPaint()
       onPaint: {
         const ctx = getContext("2d")
@@ -232,7 +253,7 @@ Item {
       }
       MouseArea {
         anchors.fill: parent
-        onClicked: { table.keyboard = false; backend.activate(slot.index, -1) }
+        onClicked: { table.keyboard = false; table.click(slot.index, -1) }
       }
     }
   }
@@ -264,6 +285,7 @@ Item {
       Behavior on x { enabled: table.animate; NumberAnimation { id: glideX; duration: 190; easing.type: Easing.OutCubic } }
       Behavior on y { enabled: table.animate; NumberAnimation { id: glideY; duration: 190; easing.type: Easing.OutCubic } }
       MouseArea {
+        objectName: "grip"
         anchors.fill: parent
         // A drag keeps hold of the card even as it leaves where it was pressed.
         preventStealing: true
@@ -296,9 +318,9 @@ Item {
           }
         }
         onReleased: finish()
-        onCanceled: finish()
-        onClicked: if (!moved) backend.activate(item.pile, item.place)
-        onDoubleClicked: if (!moved) backend.autoPlay(item.pile, item.place)
+        onCanceled: if (moved) table.cancelDrag()
+        onClicked: if (!moved) table.click(item.pile, item.place)
+        onDoubleClicked: if (!moved && !(item.pile === table.placedOn && Date.now() - table.placedAt < 600)) backend.autoPlay(item.pile, item.place)
       }
     }
   }
@@ -318,7 +340,8 @@ Item {
     border.color: table.look.ring
     border.width: Math.max(2, 2.5 * table.unit)
     SequentialAnimation on opacity {
-      running: breathing && visible && table.motion
+      // Only while the window is in front, so a hint left up doesn't keep it drawing.
+      running: breathing && visible && table.motion && table.Window.active
       loops: Animation.Infinite
       NumberAnimation { to: .25; duration: 520; easing.type: Easing.InOutSine }
       NumberAnimation { to: 1; duration: 520; easing.type: Easing.InOutSine }

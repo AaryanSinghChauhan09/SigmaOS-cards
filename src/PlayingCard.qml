@@ -62,13 +62,14 @@ Item {
       spacing: 5 * card.unit
       Text {
         id: index
+        objectName: "rank"
         text: card.label
         color: card.ink
         font.family: card.look.family
         font.weight: card.look.weight
         font.pixelSize: Math.round(card.look.indexSize * card.unit)
       }
-      Suit { anchors.verticalCenter: index.verticalCenter; suit: card.suit; color: card.ink; size: card.look.pipSize * card.unit }
+      Suit { objectName: "pip"; anchors.verticalCenter: index.verticalCenter; suit: card.suit; color: card.ink; size: card.look.pipSize * card.unit }
     }
     // Nocturne sets its suit in a moon: a gold ring with a fainter one around it.
     Rectangle {
