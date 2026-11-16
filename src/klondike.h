@@ -56,9 +56,14 @@ public:
   // Nothing is hidden any more, so the rest can only go one way.
   bool finishable() const;
   bool finishStep();
+  // The next move worth making, or nothing when there is none to be found.
   std::optional<Move> hint() const;
 
 private:
+  // Whether a lone card has anywhere to go: its foundation or a column.
+  bool placeable(const Card &card) const;
+  // Whether turning the stock, all the way round, ever shows a card that can be played.
+  bool stockHelps() const;
   std::uint32_t m_seed;
   std::vector<Card> m_piles[Piles];
   std::vector<Move> m_moves;

@@ -1,7 +1,7 @@
 #include "backend.h"
+#include "savefile.h"
 
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -36,18 +36,13 @@ Backend::Backend(const QString &savePath, QObject *parent) : QObject(parent), m_
   connect(&m_finish, &QTimer::timeout, this, &Backend::finishStep);
   if (ownsSave()) restore();
   refresh();
+  // A game left while its last cards were going home carries on from there.
+  if (m_game.finishable()) m_finish.start();
 }
 
 Backend::~Backend() {
   // The seconds since the last move are worth keeping too.
   if (canUndo()) save();
-}
-
-QVariantList Backend::targets() const {
-  QVariantList result;
-  if (m_selectedPile >= 0)
-    for (int pile : m_game.targets(m_selectedPile, m_selectedIndex)) result.append(pile);
-  return result;
 }
 
 void Backend::refresh() {
@@ -67,13 +62,19 @@ void Backend::refresh() {
     }
     m_pileInfo.append(QVariantMap{{"count", size}, {"down", down}, {"up", up}});
   }
+  runClock();
+  emit changed();
+  emit marksChanged();
+}
+
+void Backend::runClock() {
   const bool running = m_active && canUndo() && !won();
   if (running != m_clock.isActive()) running ? m_clock.start() : m_clock.stop();
-  emit changed();
 }
 
 void Backend::clearMarks() {
   m_selectedPile = m_selectedIndex = -1;
+  m_targets.clear();
   m_hintFrom = m_hintIndex = m_hintTo = -1;
   m_stuck = false;
 }
@@ -95,7 +96,7 @@ void Backend::finishStep() {
 }
 
 bool Backend::move(int from, int to, int count) {
-  if (won() || !m_game.play(from, to, count)) return false;
+  if (won() || moves() >= SaveFile::MaxMoves || !m_game.play(from, to, count)) return false;
   played();
   return true;
 }
@@ -113,13 +114,18 @@ void Backend::activate(int pile, int index) {
   const bool pickable = index >= 0 && index < int(cards.size()) && cards[index].up;
   const bool same = pile == m_selectedPile && index == m_selectedIndex;
   clearMarks();
-  if (pickable && !same) { m_selectedPile = pile; m_selectedIndex = index; }
-  emit changed();
+  if (pickable && !same) {
+    m_selectedPile = pile; m_selectedIndex = index;
+    for (int target : m_game.targets(pile, index)) m_targets.append(target);
+  }
+  emit marksChanged();
 }
 
 bool Backend::autoPlay(int pile, int index) {
   if (won() || m_finish.isActive() || pile < 0 || pile >= Piles) return false;
   if (pile == Stock) { draw(); return true; }
+  // A card that is home stays there unless it is carried back by hand.
+  if (pile >= Foundation && pile < Tableau) return false;
   const int size = int(m_game.pile(pile).size());
   if (pile < Tableau) index = size - 1;
   const int to = m_game.bestTarget(pile, index);
@@ -132,13 +138,13 @@ bool Backend::drop(int pile, int index, int to) {
 }
 
 void Backend::draw() {
-  if (won() || m_finish.isActive()) return;
+  if (won() || m_finish.isActive() || moves() >= SaveFile::MaxMoves) return;
   if (m_game.drawStock()) played();
 }
 
 void Backend::cancelSelection() {
   clearMarks();
-  emit changed();
+  emit marksChanged();
 }
 
 void Backend::undo() {
@@ -160,7 +166,7 @@ void Backend::hint() {
   } else {
     m_stuck = true;
   }
-  emit changed();
+  emit marksChanged();
 }
 
 void Backend::newGame(quint32 seed) {
@@ -168,6 +174,7 @@ void Backend::newGame(quint32 seed) {
   if (!ownsSave()) return;
   m_saveBlocked = false;
   m_error.clear();
+  emit savingChanged();
   m_game = Game(seed ? seed : randomSeed());
   m_elapsed = 0;
   emit elapsedChanged();
@@ -176,17 +183,17 @@ void Backend::newGame(quint32 seed) {
   save();
 }
 
-void Backend::dismissError() { m_error.clear(); emit changed(); }
+void Backend::dismissError() { m_error.clear(); emit savingChanged(); }
 
 void Backend::setActive(bool value) {
   if (value == m_active) return;
   m_active = value;
-  emit preferencesChanged();
-  refresh();
+  emit activeChanged();
+  runClock();
 }
 void Backend::setSeries(int value) {
   if (value < 0 || value > 3 || value == m_series) return;
-  m_series = value; emit preferencesChanged(); save();
+  m_series = value; emit seriesChanged(); save();
 }
 
 void Backend::save() {
@@ -198,43 +205,28 @@ void Backend::save() {
   QDir().mkpath(QFileInfo(m_savePath).absolutePath());
   QSaveFile file(m_savePath);
   file.setDirectWriteFallback(false);
-  const auto bytes = QJsonDocument(data).toJson();
+  // Compact, so the longest game allowed still fits the size that is read back.
+  const auto bytes = QJsonDocument(data).toJson(QJsonDocument::Compact);
   if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
     m_saveFailed = true;
-    m_error = tr("Could not save your game: %1").arg(file.errorString()); emit changed();
+    m_error = tr("Could not save your game: %1").arg(file.errorString()); emit savingChanged();
   } else if (m_saveFailed) {
-    m_saveFailed = false; m_error.clear(); emit changed();
+    m_saveFailed = false; m_error.clear(); emit savingChanged();
   }
 }
 
 void Backend::restore() {
-  if (m_savePath == ":memory:" || !QFile::exists(m_savePath)) return;
-  QFile file(m_savePath);
-  if (!file.open(QIODevice::ReadOnly)) { m_saveBlocked = true; m_error = tr("Could not open your saved game: %1").arg(file.errorString()); return; }
-  if (file.size() > 2 * 1024 * 1024) {
-    m_saveBlocked = true; m_error = tr("The saved game is too large to open."); return;
+  if (m_savePath == ":memory:") return;
+  QJsonObject data;
+  QString problem;
+  switch (SaveFile::read(m_savePath, &m_game, &data, &problem)) {
+  case SaveFile::Result::Missing: return;
+  case SaveFile::Result::Unreadable: m_saveBlocked = true; m_error = tr("Could not open your saved game: %1").arg(problem); return;
+  case SaveFile::Result::TooLarge: m_saveBlocked = true; m_error = tr("The saved game is too large to open."); return;
+  // Keep the damaged save intact until the player explicitly starts again.
+  case SaveFile::Result::Damaged: m_saveBlocked = true; m_error = tr("The saved game is damaged. Start a new game to replace it."); return;
+  case SaveFile::Result::Ok: break;
   }
-  QJsonParseError error;
-  const auto data = QJsonDocument::fromJson(file.readAll(), &error).object();
-  const qint64 seed = data["seed"].toInteger();
-  // Saves from when one card could be drawn at a time are not this game.
-  const int draw = data["draw"].toInt(Draw);
-  bool valid = error.error == QJsonParseError::NoError && data["version"].toInt() == 1 && data["moves"].isArray()
-               && data["moves"].toArray().size() <= 100000 && seed > 0 && seed <= 0xffffffffll && draw == Draw;
-  Game game{quint32(seed)};
-  if (valid) {
-    for (const auto value : data["moves"].toArray()) {
-      const auto entry = value.toArray();
-      if (entry.size() != 3 || game.won() || !game.play(entry[0].toInt(-1), entry[1].toInt(-1), entry[2].toInt(-1))) { valid = false; break; }
-    }
-  }
-  if (!valid) {
-    // Keep the damaged save intact until the player explicitly starts again.
-    m_saveBlocked = true;
-    m_error = tr("The saved game is damaged. Start a new game to replace it.");
-    return;
-  }
-  m_game = game;
   m_elapsed = std::clamp(data["elapsed"].toInt(), 0, 359999);
   m_series = std::clamp(data["series"].toInt(), 0, 3);
 }
