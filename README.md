@@ -39,4 +39,6 @@ build/cards open
 
 `cards inspect` prints the saved game and `cards deal [SEED]` prints a fresh one, both without a display and with `--json` if asked.
 
-MIT license. Shared theme, translation, and build infrastructure follows the Omarchy app templates by David Heinemeier Hansson.
+## License
+
+MIT
