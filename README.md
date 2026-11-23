@@ -1,4 +1,6 @@
-# Cards
+# SigmaOS cards
+
+> Forked from omacom/cards (MIT). See `SIGMAOS_FORK.md`.
 
 ![Cards in the Baize series](share/screenshots/baize.png)
 
