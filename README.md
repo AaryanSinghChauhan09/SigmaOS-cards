@@ -1,14 +1,14 @@
 # SigmaOS cards
 
-> Forked from omacom/cards (MIT). See `SIGMAOS_FORK.md`.
+> Forked from SigmaOS/cards (MIT). See `SIGMAOS_FORK.md`.
 
 ![Cards in the Baize series](share/screenshots/baize.png)
 
-Klondike solitaire for Omarchy, built with C++ and Qt Quick. Draw three, no limit on passes, in four card series.
+Klondike solitaire for SigmaOS, built with C++ and Qt Quick. Draw three, no limit on passes, in four card series.
 
 | | |
 | --- | --- |
-| ![Phosphor](share/screenshots/phosphor.png) **Phosphor** follows your Omarchy theme | ![Baize](share/screenshots/baize.png) **Baize** is felt, ivory, and brass |
+| ![Phosphor](share/screenshots/phosphor.png) **Phosphor** follows your SigmaOS theme | ![Baize](share/screenshots/baize.png) **Baize** is felt, ivory, and brass |
 | ![Riso](share/screenshots/riso.png) **Riso** prints two inks on paper | ![Nocturne](share/screenshots/nocturne.png) **Nocturne** is gold on a night sky |
 
 ## Play
